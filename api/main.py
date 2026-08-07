@@ -318,3 +318,11 @@ async def _rewrite_file(file: UploadFile, system_prompt_override: str | None) ->
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f'attachment; filename="{out_name}"'},
     )
+
+
+if __name__ == "__main__":
+    import os
+
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))
