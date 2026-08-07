@@ -1,8 +1,5 @@
 import random
 
-import chromadb
-from sentence_transformers import SentenceTransformer
-
 from . import config
 
 _client = None
@@ -14,6 +11,8 @@ _embedder = None
 def get_collection():
     global _client, _collection
     if _collection is None:
+        import chromadb
+
         _client = chromadb.PersistentClient(path=str(config.VECTOR_DB_DIR))
         _collection = _client.get_collection(config.COLLECTION_NAME)
     return _collection
@@ -22,6 +21,8 @@ def get_collection():
 def get_embedder():
     global _embedder
     if _embedder is None:
+        from sentence_transformers import SentenceTransformer
+
         _embedder = SentenceTransformer(config.EMBED_MODEL)
     return _embedder
 
