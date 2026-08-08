@@ -25,6 +25,14 @@ def parse_pdf(file_bytes: bytes) -> str:
     return "\n\n".join(pages)
 
 
+def docx_stats(file_bytes: bytes) -> tuple[int, int]:
+    doc = docx.Document(io.BytesIO(file_bytes))
+    xml = doc.element.body.xml
+    images = xml.count("pic:pic")
+    tables = len(doc.tables)
+    return images, tables
+
+
 def extract_text(file_bytes: bytes, filename: str) -> str:
     suffix = Path(filename).suffix.lower()
     if suffix == ".docx":
