@@ -21,8 +21,19 @@ DEFAULT_GEMINI_MODELS = [
 ]
 
 
+def _get_groq_client():
+    global _groq_client
+    if _groq_client is None:
+        with _client_lock:
+            if _groq_client is None:
+                from groq import Groq
+
+                _groq_client = Groq(api_key=os.getenv(config.GROQ_API_KEY))
+    return _groq_client
+
+
 def get_client():
-    global _groq_client, _gemini_client
+    global _gemini_client
     if config.LLM_PROVIDER == "gemini":
         if _gemini_client is None:
             with _client_lock:
@@ -31,13 +42,7 @@ def get_client():
 
                     _gemini_client = genai.Client(api_key=os.getenv(config.GEMINI_API_KEY))
         return _gemini_client
-    if _groq_client is None:
-        with _client_lock:
-            if _groq_client is None:
-                from groq import Groq
-
-                _groq_client = Groq(api_key=os.getenv(config.GROQ_API_KEY))
-    return _groq_client
+    return _get_groq_client()
 
 
 def _available_models():
@@ -123,7 +128,7 @@ def _ask_groq(prompt: str, system_prompt: str, temperature: float) -> str:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
-    response = get_client().chat.completions.create(
+    response = _get_groq_client().chat.completions.create(
         model=config.LLM_MODEL,
         messages=messages,
         temperature=temperature,
