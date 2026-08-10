@@ -64,6 +64,15 @@ def _retry_delay(message: str) -> float:
     return float(m.group(1)) if m else 15.0
 
 
+def _is_quota_error(e: Exception) -> bool:
+    msg = str(e)
+    return "429" in msg or "RESOURCE_EXHAUSTED" in msg
+
+
+def _groq_available() -> bool:
+    return bool(os.getenv(config.GROQ_API_KEY))
+
+
 def _gemini_generate(model: str, prompt: str, system_prompt: str, temperature: float) -> str:
     from google.genai import types
 
@@ -91,6 +100,10 @@ def _ask_gemini(prompt: str, system_prompt: str, temperature: float) -> str:
                 msg = str(e)
                 if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
                     last_err = e
+                    delay = _retry_delay(msg)
+                    if delay <= 10.0:
+                        time.sleep(delay)
+                        continue
                     break
                 if "503" in msg or "UNAVAILABLE" in msg:
                     last_err = e
@@ -100,7 +113,6 @@ def _ask_gemini(prompt: str, system_prompt: str, temperature: float) -> str:
                 raise
         _advance_model()
     if last_err is not None:
-        time.sleep(_retry_delay(str(last_err)))
         raise last_err
     raise RuntimeError("No Gemini model available")
 
@@ -121,5 +133,19 @@ def _ask_groq(prompt: str, system_prompt: str, temperature: float) -> str:
 
 def ask(prompt: str, system_prompt: str = None, temperature: float = 0.4) -> str:
     if config.LLM_PROVIDER == "gemini":
-        return _ask_gemini(prompt, system_prompt, temperature)
+        try:
+            return _ask_gemini(prompt, system_prompt, temperature)
+        except Exception as e:
+            if not _is_quota_error(e):
+                raise
+            if _groq_available():
+                try:
+                    return _ask_groq(prompt, system_prompt, temperature)
+                except Exception as groq_err:
+                    raise RuntimeError(
+                        f"Gemini API quota exhausted and Groq fallback failed: {groq_err}"
+                    ) from e
+            raise RuntimeError(
+                "Gemini API quota exhausted and no GROQ_API_KEY is set for automatic fallback."
+            ) from e
     return _ask_groq(prompt, system_prompt, temperature)

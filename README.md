@@ -9,6 +9,7 @@ AI ghostwriting assistant that rewrites documents in a specific author's voice. 
 - Keeps headings, paragraphs and document structure intact for `.docx` output
 - RAG retrieval over an embedded document library (ChromaDB + sentence-transformers)
 - Model rotation with retry/fallback across Gemini and Groq
+- Automatic fallback to Groq when the Gemini quota is exhausted (if `GROQ_API_KEY` is set)
 - FastAPI service with auto-generated Swagger docs at `/docs`
 
 ## Setup
