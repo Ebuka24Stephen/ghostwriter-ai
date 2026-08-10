@@ -1,5 +1,6 @@
 import os
 import re
+import threading
 import time
 
 from . import config
@@ -7,6 +8,9 @@ from . import config
 _groq_client = None
 _gemini_client = None
 _model_index = 0
+
+_client_lock = threading.Lock()
+_model_lock = threading.Lock()
 
 DEFAULT_GEMINI_MODELS = [
     "gemini-3.6-flash",
@@ -21,14 +25,18 @@ def get_client():
     global _groq_client, _gemini_client
     if config.LLM_PROVIDER == "gemini":
         if _gemini_client is None:
-            from google import genai
+            with _client_lock:
+                if _gemini_client is None:
+                    from google import genai
 
-            _gemini_client = genai.Client(api_key=os.getenv(config.GEMINI_API_KEY))
+                    _gemini_client = genai.Client(api_key=os.getenv(config.GEMINI_API_KEY))
         return _gemini_client
     if _groq_client is None:
-        from groq import Groq
+        with _client_lock:
+            if _groq_client is None:
+                from groq import Groq
 
-        _groq_client = Groq(api_key=os.getenv(config.GROQ_API_KEY))
+                _groq_client = Groq(api_key=os.getenv(config.GROQ_API_KEY))
     return _groq_client
 
 
@@ -40,13 +48,15 @@ def _available_models():
 
 
 def _current_model():
-    models = _available_models()
-    return models[_model_index % len(models)]
+    with _model_lock:
+        models = _available_models()
+        return models[_model_index % len(models)]
 
 
 def _advance_model():
     global _model_index
-    _model_index += 1
+    with _model_lock:
+        _model_index += 1
 
 
 def _retry_delay(message: str) -> float:

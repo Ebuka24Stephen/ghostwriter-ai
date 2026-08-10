@@ -79,8 +79,13 @@ Errors return JSON with a `detail` field: `400` for missing/empty input or unsup
 | `GHOSTWRITER_PROVIDER` | `gemini` | Primary LLM provider |
 | `GEMINI_MODEL` | `gemini-3.6-flash` | Gemini model name |
 | `GHOSTWRITER_CHUNK_SIZE` | `8` | Sentences per rewrite request |
+| `GHOSTWRITER_MAX_WORKERS` | `4` | Chunks rewritten in parallel (one LLM call per worker) |
 | `GHOSTWRITER_KEEP_RATIO` | `0.4` | Fraction of sentences kept verbatim |
 | `GHOSTWRITER_TEMPERATURE` | `0.8` | Sampling temperature |
+
+## Performance / timeouts
+
+Chunks are rewritten in parallel (`GHOSTWRITER_MAX_WORKERS`, default 4), so wall-clock time is roughly `chunks / workers × per-call latency` rather than `chunks × per-call latency`. A single synchronous request still must finish inside your proxy's timeout (e.g. Cloudflare's ~100s): for long documents set `GHOSTWRITER_CHUNK_SIZE` (e.g. `40`) and `GHOSTWRITER_MAX_WORKERS` (e.g. `4`) so the request completes well under that limit.
 
 ## Project layout
 

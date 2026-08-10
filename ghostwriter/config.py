@@ -12,6 +12,7 @@ LLM_MODEL = "llama-3.3-70b-versatile"
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 KEEP_RATIO = float(os.environ.get("GHOSTWRITER_KEEP_RATIO", "0.4"))
 REWRITE_CHUNK_SIZE = int(os.environ.get("GHOSTWRITER_CHUNK_SIZE", "8"))
+REWRITE_MAX_WORKERS = int(os.environ.get("GHOSTWRITER_MAX_WORKERS", "4"))
 REWRITE_TEMPERATURE = float(os.environ.get("GHOSTWRITER_TEMPERATURE", "0.8"))
 EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 STYLE_PROMPT_FILE = Path("data/style_prompt.txt")

@@ -1,5 +1,6 @@
 import io
 import re
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 
 from docx import Document
@@ -210,6 +211,39 @@ def strip_added_tail(rewritten, original):
     return candidate
 
 
+def _rewrite_chunk(chunk, system_prompt):
+    lines = []
+    for n, s, prev_s, next_s in chunk:
+        if prev_s and next_s:
+            ctx = '\n   (Between: "%s" ... "%s")' % (prev_s, next_s)
+        elif prev_s:
+            ctx = '\n   (Previous sentence: "%s")' % prev_s
+        elif next_s:
+            ctx = '\n   (Next sentence: "%s")' % next_s
+        else:
+            ctx = ""
+        lines.append("%d. %s%s" % (n, s, ctx))
+    numbered = "\n".join(lines)
+    prompt = f"""Rewrite each numbered sentence below in the author's voice as described in the system prompt.
+
+{numbered}
+
+Rules:
+- Produce exactly ONE rewritten sentence per number, in the same order
+- Keep the same numbering
+- Do not add, remove, merge, or split any sentences
+- Say the same idea in clearly DIFFERENT words and sentence structure. This must NOT be a near-copy of the original — change at least half the words and reorder the clauses
+- Do NOT add new facts, examples, or ideas
+- Do NOT append any new clause that adds evaluation, commentary, or a conclusion (no "and this is...", "thus ...ing", "which is...", or similar)
+- Keep all facts, numbers, and any citation exactly as written inside its parentheses, e.g. "(Ismail et al., 2023)"
+- Match the original's length roughly, not exactly — the goal is different wording, not different size
+- Use the "(Between: ...)" context only to fit the sentence naturally; never copy words from it into your rewritten sentence
+- Self-check before answering: compare each sentence you wrote against the author's example passages in the system prompt. If it sounds too clean, smooth, modern, or AI-like, rewrite it again internally. Also confirm it is NOT a near-copy of the original sentence
+- Return only the numbered rewritten sentences, nothing else"""
+    result = llm.ask(prompt, system_prompt=system_prompt, temperature=config.REWRITE_TEMPERATURE)
+    return _parse_numbered(result)
+
+
 def rewrite_document(document, system_prompt):
     document = sanitize_footers(document)
     paras = [p for p in document.split("\n\n") if p.strip()]
@@ -256,39 +290,10 @@ def rewrite_document(document, system_prompt):
 
     rewrites = {}
     original_map = {n: s for n, s, _, _ in to_rewrite}
-    for start in range(0, len(to_rewrite), CHUNK_SIZE):
-        chunk = to_rewrite[start:start + CHUNK_SIZE]
-        lines = []
-        for n, s, prev_s, next_s in chunk:
-            if prev_s and next_s:
-                ctx = '\n   (Between: "%s" ... "%s")' % (prev_s, next_s)
-            elif prev_s:
-                ctx = '\n   (Previous sentence: "%s")' % prev_s
-            elif next_s:
-                ctx = '\n   (Next sentence: "%s")' % next_s
-            else:
-                ctx = ""
-            lines.append("%d. %s%s" % (n, s, ctx))
-        numbered = "\n".join(lines)
-        prompt = f"""Rewrite each numbered sentence below in the author's voice as described in the system prompt.
-
-{numbered}
-
-Rules:
-- Produce exactly ONE rewritten sentence per number, in the same order
-- Keep the same numbering
-- Do not add, remove, merge, or split any sentences
-- Say the same idea in clearly DIFFERENT words and sentence structure. This must NOT be a near-copy of the original — change at least half the words and reorder the clauses
-- Do NOT add new facts, examples, or ideas
-- Do NOT append any new clause that adds evaluation, commentary, or a conclusion (no "and this is...", "thus ...ing", "which is...", or similar)
-- Keep all facts, numbers, and any citation exactly as written inside its parentheses, e.g. "(Ismail et al., 2023)"
-- Match the original's length roughly, not exactly — the goal is different wording, not different size
-- Use the "(Between: ...)" context only to fit the sentence naturally; never copy words from it into your rewritten sentence
-- Self-check before answering: compare each sentence you wrote against the author's example passages in the system prompt. If it sounds too clean, smooth, modern, or AI-like, rewrite it again internally. Also confirm it is NOT a near-copy of the original sentence
-- Return only the numbered rewritten sentences, nothing else"""
-
-        result = llm.ask(prompt, system_prompt=system_prompt, temperature=config.REWRITE_TEMPERATURE)
-        rewrites.update(_parse_numbered(result))
+    chunks = [to_rewrite[start:start + CHUNK_SIZE] for start in range(0, len(to_rewrite), CHUNK_SIZE)]
+    with ThreadPoolExecutor(max_workers=min(config.REWRITE_MAX_WORKERS, len(chunks)) or 1) as executor:
+        for parsed in executor.map(lambda c: _rewrite_chunk(c, system_prompt), chunks):
+            rewrites.update(parsed)
 
     for attempt in range(2):
         too_similar = [

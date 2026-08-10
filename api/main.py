@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from pathlib import Path
 
@@ -276,7 +277,7 @@ async def rewrite(
     if file:
         return await _rewrite_file(file, system_prompt_override)
     elif draft:
-        return _rewrite_text(draft, system_prompt_override)
+        return await asyncio.to_thread(_rewrite_text, draft, system_prompt_override)
     else:
         raise HTTPException(status_code=400, detail="Provide either 'draft' text or a 'file' upload")
 
@@ -324,13 +325,12 @@ async def _rewrite_file(file: UploadFile, system_prompt_override: str | None) ->
 
     try:
         if suffix == ".docx":
-            result_bytes = ghostwriter.rewrite.rewrite_docx(file_bytes, system_prompt)
+            result_bytes = await asyncio.to_thread(ghostwriter.rewrite.rewrite_docx, file_bytes, system_prompt)
             out_name = Path(filename).stem + "_rewritten.docx"
         else:
-            text = ghostwriter.parse.parse_pdf(file_bytes)
-            result = ghostwriter.rewrite.rewrite_document(text, system_prompt)
-            doc = ghostwriter.parse._make_docx_from_text(result)
-            result_bytes = doc
+            text = await asyncio.to_thread(ghostwriter.parse.parse_pdf, file_bytes)
+            result = await asyncio.to_thread(ghostwriter.rewrite.rewrite_document, text, system_prompt)
+            result_bytes = await asyncio.to_thread(ghostwriter.parse._make_docx_from_text, result)
             out_name = Path(filename).stem + "_rewritten.docx"
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
