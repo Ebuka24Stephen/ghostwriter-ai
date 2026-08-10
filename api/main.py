@@ -160,8 +160,7 @@ fileBtn.addEventListener('click', function() {
       var name = 'rewritten.docx';
       var m = cd.match(/filename="([^"]+)"/);
       if (m) name = m[1];
-      var warn = resp.headers.get('X-Ghostwriter-Warning') || '';
-      return resp.blob().then(function(blob) { return { blob: blob, name: name, warn: warn }; });
+      return resp.blob().then(function(blob) { return { blob: blob, name: name }; });
     })
     .then(function(r) {
       var url = URL.createObjectURL(r.blob);
@@ -169,7 +168,7 @@ fileBtn.addEventListener('click', function() {
       a.href = url; a.download = r.name;
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(function() { URL.revokeObjectURL(url); }, 4000);
-      setStatus(fileStatus, 'Done — downloading ' + r.name + (r.warn ? '. ' + r.warn : ''), 'ok');
+      setStatus(fileStatus, 'Done — downloading ' + r.name, 'ok');
     })
     .catch(function(err) { setStatus(fileStatus, err.message, 'err'); })
     .finally(function() { fileBtn.disabled = false; });
@@ -313,23 +312,15 @@ async def _rewrite_file(file: UploadFile, system_prompt_override: str | None) ->
         raise HTTPException(status_code=400, detail="File is empty")
 
     system_prompt = system_prompt_override or ghostwriter.style.load_prompt()
-    warning = ""
 
     if suffix == ".docx":
         try:
-            images, tables = ghostwriter.parse.docx_stats(file_bytes)
+            ghostwriter.parse.docx_stats(file_bytes)
         except Exception:
             raise HTTPException(
                 status_code=400,
                 detail="Not a valid .docx file (is it an image or an HTML document renamed to .docx?)",
             )
-        if images or tables:
-            parts = []
-            if images:
-                parts.append(f"{images} embedded image(s)")
-            if tables:
-                parts.append(f"{tables} table(s)")
-            warning = f"Warning: {' and '.join(parts)} were not preserved in the rewritten document."
 
     try:
         if suffix == ".docx":
@@ -350,14 +341,10 @@ async def _rewrite_file(file: UploadFile, system_prompt_override: str | None) ->
     output_path = output_dir / f"rewrite_{ts}_{out_name}"
     output_path.write_bytes(result_bytes)
 
-    headers = {"Content-Disposition": f'attachment; filename="{out_name}"'}
-    if warning:
-        headers["X-Ghostwriter-Warning"] = warning
-
     return Response(
         content=result_bytes,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers=headers,
+        headers={"Content-Disposition": f'attachment; filename="{out_name}"'},
     )
 
 

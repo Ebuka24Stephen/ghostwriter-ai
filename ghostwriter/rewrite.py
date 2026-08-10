@@ -1,7 +1,9 @@
 import io
 import re
+from copy import deepcopy
 
 from docx import Document
+from docx.oxml.ns import qn
 
 from . import config, llm
 
@@ -325,6 +327,50 @@ Rules:
     return cap_document(document, "\n\n".join(rebuilt))
 
 
+def _has_picture(elem):
+    return (
+        elem.find(qn("w:drawing")) is not None
+        or elem.find(qn("w:pict")) is not None
+        or any(True for _ in elem.iter(qn("pic:pic")))
+    )
+
+
+def _replace_paragraph_text(paragraph, new_text):
+    p_elem = paragraph._p
+    template_rpr = None
+    image_children = []
+    for child in list(p_elem):
+        if child.tag in (
+            qn("w:pPr"),
+            qn("w:bookmarkStart"),
+            qn("w:bookmarkEnd"),
+            qn("w:proofErr"),
+        ):
+            continue
+        if _has_picture(child):
+            image_children.append(child)
+            continue
+        if template_rpr is None:
+            for r in child.iter(qn("w:r")):
+                rpr = r.find(qn("w:rPr"))
+                if rpr is not None:
+                    template_rpr = rpr
+                    break
+        p_elem.remove(child)
+
+    run = paragraph.add_run(new_text)
+    if template_rpr is not None:
+        run._element.insert(0, deepcopy(template_rpr))
+
+    if image_children:
+        image_children[0].addprevious(run._element)
+    else:
+        ppr = p_elem.find(qn("w:pPr"))
+        if ppr is not None:
+            ppr.addnext(run._element)
+    return paragraph
+
+
 def rewrite_docx(file_bytes: bytes, system_prompt: str) -> bytes:
     doc = Document(io.BytesIO(file_bytes))
     original = list(doc.paragraphs)
@@ -352,21 +398,18 @@ def rewrite_docx(file_bytes: bytes, system_prompt: str) -> bytes:
     rewritten_body = rewrite_document("\n\n".join(body_paras), system_prompt)
     rewritten_paras = [p.strip() for p in rewritten_body.split("\n\n") if p.strip()]
 
-    out = Document()
     idx = 0
     for i, p in enumerate(original):
+        if i not in body_indices:
+            continue
         text = p.text.strip()
         if not text:
             continue
-
-        if i in body_indices:
-            rewritten = rewritten_paras[idx] if idx < len(rewritten_paras) else text
-            out.add_paragraph(cap_paragraph(rewritten, text))
-            idx += 1
-        else:
-            out.add_paragraph(text, style=p.style.name if p.style.name.startswith("Heading") else None)
+        rewritten = rewritten_paras[idx] if idx < len(rewritten_paras) else text
+        _replace_paragraph_text(p, cap_paragraph(rewritten, text))
+        idx += 1
 
     buf = io.BytesIO()
-    out.save(buf)
+    doc.save(buf)
     buf.seek(0)
     return buf.getvalue()
