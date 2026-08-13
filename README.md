@@ -7,6 +7,7 @@ AI ghostwriting assistant that rewrites documents in a specific author's voice. 
 - Rewrites pasted text or uploaded files (`.docx`, `.pdf`) in the author's voice
 - Sentence-level rewriting with a similarity check: sentences too close to the original are regenerated
 - Keeps headings, paragraphs and document structure intact for `.docx` output
+- Rejoins sentences that were split across paragraphs (e.g. a continuation paragraph starting lowercase after one that doesn't end with punctuation)
 - RAG retrieval over an embedded document library (ChromaDB + sentence-transformers)
 - Model rotation with retry/fallback across Gemini and Groq
 - Automatic fallback to Groq when the Gemini quota is exhausted (if `GROQ_API_KEY` is set)

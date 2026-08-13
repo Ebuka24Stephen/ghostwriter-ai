@@ -387,16 +387,29 @@ def rewrite_docx(file_bytes: bytes, system_prompt: str) -> bytes:
     doc = Document(io.BytesIO(file_bytes))
     original = list(doc.paragraphs)
 
-    body = []
+    raw = []
     for i, p in enumerate(original):
         text = re.sub(r"\n", " ", p.text).strip()
         if not text:
             continue
         if is_heading(text):
             continue
-        if len(text) < 20:
-            continue
-        body.append((text, i))
+        raw.append((text, i))
+
+    merged = []
+    consumed = set()
+    for text, i in raw:
+        if (
+            merged
+            and not re.search(r"[.!?]\s*$", merged[-1][0])
+            and re.match(r"^[a-z]", text)
+        ):
+            merged[-1] = (merged[-1][0] + " " + text, merged[-1][1])
+            consumed.add(i)
+        else:
+            merged.append((text, i))
+
+    body = [(t, i) for t, i in merged if len(t) >= 20]
 
     seen = []
     filtered = []
@@ -406,6 +419,7 @@ def rewrite_docx(file_bytes: bytes, system_prompt: str) -> bytes:
             seen.append(text)
     body_paras = [t for t, _ in filtered]
     body_indices = {i for _, i in filtered}
+    body_sources = {i: t for t, i in filtered}
 
     rewritten_body = rewrite_document("\n\n".join(body_paras), system_prompt)
     rewritten_paras = [p.strip() for p in rewritten_body.split("\n\n") if p.strip()]
@@ -418,8 +432,12 @@ def rewrite_docx(file_bytes: bytes, system_prompt: str) -> bytes:
         if not text:
             continue
         rewritten = rewritten_paras[idx] if idx < len(rewritten_paras) else text
-        _replace_paragraph_text(p, cap_paragraph(rewritten, text))
+        _replace_paragraph_text(p, cap_paragraph(rewritten, body_sources.get(i, text)))
         idx += 1
+
+    for i in sorted(consumed, reverse=True):
+        p_elem = original[i]._p
+        p_elem.getparent().remove(p_elem)
 
     buf = io.BytesIO()
     doc.save(buf)
