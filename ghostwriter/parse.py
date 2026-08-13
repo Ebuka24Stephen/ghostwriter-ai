@@ -1,4 +1,5 @@
 import io
+import re
 from pathlib import Path
 
 import docx
@@ -46,7 +47,7 @@ def extract_text(file_bytes: bytes, filename: str) -> str:
 def _make_docx_from_text(text: str) -> bytes:
     doc = docx.Document()
     for para in text.split("\n\n"):
-        para = para.strip()
+        para = re.sub(r"\n", " ", para).strip()
         if para:
             doc.add_paragraph(para)
     out = io.BytesIO()

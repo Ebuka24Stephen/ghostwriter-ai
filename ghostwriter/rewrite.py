@@ -244,8 +244,15 @@ Rules:
     return _parse_numbered(result)
 
 
+def _collapse_line_breaks(text):
+    paragraphs = []
+    for para in text.split("\n\n"):
+        paragraphs.append(re.sub(r"\n", " ", para))
+    return "\n\n".join(paragraphs)
+
+
 def rewrite_document(document, system_prompt):
-    document = sanitize_footers(document)
+    document = _collapse_line_breaks(sanitize_footers(document))
     paras = [p for p in document.split("\n\n") if p.strip()]
     deduped = []
     seen_paras = []
@@ -382,7 +389,7 @@ def rewrite_docx(file_bytes: bytes, system_prompt: str) -> bytes:
 
     body = []
     for i, p in enumerate(original):
-        text = p.text.strip()
+        text = re.sub(r"\n", " ", p.text).strip()
         if not text:
             continue
         if is_heading(text):
@@ -407,7 +414,7 @@ def rewrite_docx(file_bytes: bytes, system_prompt: str) -> bytes:
     for i, p in enumerate(original):
         if i not in body_indices:
             continue
-        text = p.text.strip()
+        text = re.sub(r"\n", " ", p.text).strip()
         if not text:
             continue
         rewritten = rewritten_paras[idx] if idx < len(rewritten_paras) else text
