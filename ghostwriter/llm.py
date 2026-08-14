@@ -104,8 +104,13 @@ def _is_overloaded(e: Exception) -> bool:
     return "503" in msg or "UNAVAILABLE" in msg
 
 
+def _is_server_error(e: Exception) -> bool:
+    msg = str(e)
+    return "500" in msg or "INTERNAL" in msg
+
+
 def _is_fallback_error(e: Exception) -> bool:
-    return _is_quota_error(e) or _is_model_unavailable(e) or _is_overloaded(e)
+    return _is_quota_error(e) or _is_model_unavailable(e) or _is_overloaded(e) or _is_server_error(e)
 
 
 def _groq_available() -> bool:
@@ -159,6 +164,12 @@ def _ask_gemini(prompt: str, system_prompt: str, temperature: float) -> str:
                         continue
                     break
                 if "503" in msg or "UNAVAILABLE" in msg:
+                    last_err = e
+                    if attempt == 0:
+                        time.sleep(min(2.0, max(_remaining(), 0)))
+                        continue
+                    break
+                if "500" in msg or "INTERNAL" in msg:
                     last_err = e
                     if attempt == 0:
                         time.sleep(min(2.0, max(_remaining(), 0)))
