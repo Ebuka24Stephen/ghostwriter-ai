@@ -1,4 +1,6 @@
 import asyncio
+import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -7,11 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 import ghostwriter
-from ghostwriter.models import RewriteRequest, RewriteResponse
 
 app = FastAPI(
     title="GhostWriter API",
-    version="1.0.0",
+    version="1.1.0",
     openapi_tags=[
         {
             "name": "rewrite",
@@ -27,6 +28,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_JOB_TTL = 1800.0
+_jobs: dict[str, dict] = {}
+
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
@@ -34,6 +38,80 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"detail": f"{type(exc).__name__}: {exc}"},
     )
+
+
+def _new_job(kind: str, filename: str | None = None) -> dict:
+    job_id = uuid.uuid4().hex[:16]
+    job = {
+        "id": job_id,
+        "kind": kind,
+        "status": "pending",
+        "error": None,
+        "result": None,
+        "filename": filename,
+        "out_name": None,
+        "created": time.time(),
+    }
+    _jobs[job_id] = job
+    return job
+
+
+def _cleanup_jobs():
+    now = time.time()
+    for jid in [j for j, jb in list(_jobs.items()) if now - jb["created"] > _JOB_TTL]:
+        _jobs.pop(jid, None)
+
+
+def _do_text_rewrite(draft: str, system_prompt: str) -> str:
+    result = ghostwriter.rewrite.rewrite_document(draft, system_prompt)
+
+    output_dir = Path("data/rewritten")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = output_dir / f"rewrite_{ts}.txt"
+    output_path.write_text(result, encoding="utf8")
+
+    return result
+
+
+def _do_file_rewrite(file_bytes: bytes, filename: str, system_prompt: str) -> bytes:
+    suffix = Path(filename).suffix.lower()
+
+    if suffix == ".docx":
+        result_bytes = ghostwriter.rewrite.rewrite_docx(file_bytes, system_prompt)
+    else:
+        text = ghostwriter.parse.parse_pdf(file_bytes)
+        result = ghostwriter.rewrite.rewrite_document(text, system_prompt)
+        result_bytes = ghostwriter.parse._make_docx_from_text(result)
+
+    output_dir = Path("data/rewritten")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_name = Path(filename).stem + "_rewritten.docx"
+    output_path = output_dir / f"rewrite_{ts}_{out_name}"
+    output_path.write_bytes(result_bytes)
+
+    return result_bytes
+
+
+async def _run_job(job_id: str):
+    job = _jobs.get(job_id)
+    if job is None:
+        return
+    job["status"] = "running"
+    try:
+        if job["kind"] == "text":
+            job["result"] = await asyncio.to_thread(
+                _do_text_rewrite, job["draft"], job["system_prompt"]
+            )
+        else:
+            job["result"] = await asyncio.to_thread(
+                _do_file_rewrite, job["file_bytes"], job["filename"], job["system_prompt"]
+            )
+        job["status"] = "done"
+    except Exception as e:
+        job["status"] = "error"
+        job["error"] = f"{type(e).__name__}: {e}"
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -115,6 +193,36 @@ tabs.forEach(function(tab) {
   });
 });
 
+function setStatus(el, msg, type) {
+  el.className = 'status' + (type ? ' ' + type : '');
+  el.innerHTML = msg;
+}
+
+function pollJob(jobId, kind) {
+  return fetch('/rewrite/' + jobId).then(function(resp) {
+    if (!resp.ok) { throw new Error('Status ' + resp.status + ': failed to check rewrite job'); }
+    return resp.json();
+  }).then(function(job) {
+    if (job.status === 'error') { throw new Error(job.error || 'Rewrite failed'); }
+    if (job.status === 'done') {
+      if (kind === 'file') {
+        return fetch(job.download_url).then(function(r) {
+          if (!r.ok) { throw new Error('Status ' + r.status + ': download failed'); }
+          var cd = r.headers.get('Content-Disposition') || '';
+          var name = 'rewritten.docx';
+          var m = cd.match(/filename="([^"]+)"/);
+          if (m) name = m[1];
+          return r.blob().then(function(blob) { return { blob: blob, name: name }; });
+        });
+      }
+      return job.rewritten;
+    }
+    return new Promise(function(resolve) {
+      setTimeout(function() { resolve(pollJob(jobId, kind)); }, 3000);
+    });
+  });
+}
+
 var drop = document.getElementById('drop');
 var fileInput = document.getElementById('fileInput');
 var fileMeta = document.getElementById('fileMeta');
@@ -131,11 +239,6 @@ function showFile() {
   var f = fileInput.files[0];
   if (!f) { fileMeta.textContent = ''; return; }
   fileMeta.textContent = f.name + ' (' + (f.size / 1024).toFixed(1) + ' KB)';
-}
-
-function setStatus(el, msg, type) {
-  el.className = 'status' + (type ? ' ' + type : '');
-  el.innerHTML = msg;
 }
 
 fileBtn.addEventListener('click', function() {
@@ -157,12 +260,9 @@ fileBtn.addEventListener('click', function() {
           throw new Error('Status ' + resp.status + ': ' + detail);
         });
       }
-      var cd = resp.headers.get('Content-Disposition') || '';
-      var name = 'rewritten.docx';
-      var m = cd.match(/filename="([^"]+)"/);
-      if (m) name = m[1];
-      return resp.blob().then(function(blob) { return { blob: blob, name: name }; });
+      return resp.json();
     })
+    .then(function(job) { return pollJob(job.job_id, 'file'); })
     .then(function(r) {
       var url = URL.createObjectURL(r.blob);
       var a = document.createElement('a');
@@ -193,17 +293,17 @@ textBtn.addEventListener('click', function() {
 
   fetch('/rewrite', { method: 'POST', body: fd })
     .then(function(resp) {
-      return resp.text().then(function(txt) {
-        if (!resp.ok) {
+      if (!resp.ok) {
+        return resp.text().then(function(txt) {
           var detail = 'Rewrite failed';
           try { detail = JSON.parse(txt).detail || detail; }
           catch (e) { detail = txt.slice(0, 200) || detail; }
           throw new Error('Status ' + resp.status + ': ' + detail);
-        }
-        try { return JSON.parse(txt).rewritten; }
-        catch (e) { throw new Error('Unexpected response from server'); }
-      });
+        });
+      }
+      return resp.json();
     })
+    .then(function(job) { return pollJob(job.job_id, 'text'); })
     .then(function(rewritten) {
       textResult.value = rewritten;
       textOutput.style.display = 'block';
@@ -234,28 +334,26 @@ def health():
 @app.post(
     "/rewrite",
     tags=["rewrite"],
-    response_model=RewriteResponse,
-    summary="Rewrite a document",
+    summary="Submit a rewrite job",
     description=(
-        "Rewrites the provided draft or uploaded file in the author's voice. "
+        "Submits the provided draft or uploaded file for rewriting in the author's voice. "
         "Accepts `multipart/form-data`. Provide exactly one of `draft` or `file`.\n\n"
-        "- **Text input** (`draft`): returns JSON `{\"rewritten\": \"...\"}`.\n"
-        "- **File input** (`file`, .docx or .pdf): returns the rewritten document "
-        "as a downloadable `.docx` file (`Content-Disposition` attachment).\n\n"
+        "The rewrite runs in the background. Returns `202` with a `job_id`; poll "
+        "`GET /rewrite/{job_id}` until `status` is `done` or `error`. For file jobs, "
+        "download the result from the returned `download_url`.\n\n"
+        "- **Text input** (`draft`): on completion, the poll response contains `rewritten`.\n"
+        "- **File input** (`file`, .docx or .pdf): on completion, download the rewritten "
+        "`.docx` via `download_url`.\n\n"
         "Optionally pass `system_prompt_override` to replace the default author-style prompt."
     ),
     responses={
-        200: {
-            "description": "Successful rewrite. Returns JSON when `draft` was provided, "
-            "or a `.docx` file download when `file` was provided.",
+        202: {
+            "description": "Job accepted and running in the background.",
+            "content": {"application/json": {"example": {"job_id": "abc123", "status": "running"}}},
         },
         400: {
             "description": "Bad request: missing/empty input, or unsupported file type.",
             "content": {"application/json": {"example": {"detail": "Provide either 'draft' text or a 'file' upload"}}},
-        },
-        500: {
-            "description": "Rewrite pipeline failed.",
-            "content": {"application/json": {"example": {"detail": "..."}}},
         },
     },
 )
@@ -274,77 +372,75 @@ async def rewrite(
         description="Optional. Replaces the default author-style system prompt used for rewriting.",
     ),
 ):
-    if file:
-        return await _rewrite_file(file, system_prompt_override)
-    elif draft:
-        return await asyncio.to_thread(_rewrite_text, draft, system_prompt_override)
-    else:
+    if not file and not draft:
         raise HTTPException(status_code=400, detail="Provide either 'draft' text or a 'file' upload")
 
-
-def _rewrite_text(draft: str, system_prompt_override: str | None) -> RewriteResponse:
-    if not draft.strip():
-        raise HTTPException(status_code=400, detail="draft must not be empty")
-
     system_prompt = system_prompt_override or ghostwriter.style.load_prompt()
-    try:
-        result = ghostwriter.rewrite.rewrite_document(draft, system_prompt)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    _cleanup_jobs()
 
-    output_dir = Path("data/rewritten")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = output_dir / f"rewrite_{ts}.txt"
-    output_path.write_text(result, encoding="utf8")
+    if file:
+        filename = file.filename or "upload.docx"
+        suffix = Path(filename).suffix.lower()
+        if suffix not in (".docx", ".pdf"):
+            raise HTTPException(status_code=400, detail="Only .docx and .pdf files are supported")
 
-    return RewriteResponse(rewritten=result)
+        file_bytes = await file.read()
+        if not file_bytes:
+            raise HTTPException(status_code=400, detail="File is empty")
 
-
-async def _rewrite_file(file: UploadFile, system_prompt_override: str | None) -> Response:
-    filename = file.filename or "upload.docx"
-    suffix = Path(filename).suffix.lower()
-
-    if suffix not in (".docx", ".pdf"):
-        raise HTTPException(status_code=400, detail="Only .docx and .pdf files are supported")
-
-    file_bytes = await file.read()
-    if not file_bytes:
-        raise HTTPException(status_code=400, detail="File is empty")
-
-    system_prompt = system_prompt_override or ghostwriter.style.load_prompt()
-
-    if suffix == ".docx":
-        try:
-            ghostwriter.parse.docx_stats(file_bytes)
-        except Exception:
-            raise HTTPException(
-                status_code=400,
-                detail="Not a valid .docx file (is it an image or an HTML document renamed to .docx?)",
-            )
-
-    try:
         if suffix == ".docx":
-            result_bytes = await asyncio.to_thread(ghostwriter.rewrite.rewrite_docx, file_bytes, system_prompt)
-            out_name = Path(filename).stem + "_rewritten.docx"
-        else:
-            text = await asyncio.to_thread(ghostwriter.parse.parse_pdf, file_bytes)
-            result = await asyncio.to_thread(ghostwriter.rewrite.rewrite_document, text, system_prompt)
-            result_bytes = await asyncio.to_thread(ghostwriter.parse._make_docx_from_text, result)
-            out_name = Path(filename).stem + "_rewritten.docx"
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+            try:
+                ghostwriter.parse.docx_stats(file_bytes)
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Not a valid .docx file (is it an image or an HTML document renamed to .docx?)",
+                )
 
-    output_dir = Path("data/rewritten")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = output_dir / f"rewrite_{ts}_{out_name}"
-    output_path.write_bytes(result_bytes)
+        job = _new_job("file", filename=filename)
+        job["file_bytes"] = file_bytes
+        job["system_prompt"] = system_prompt
+        job["out_name"] = Path(filename).stem + "_rewritten.docx"
+    else:
+        if not draft.strip():
+            raise HTTPException(status_code=400, detail="draft must not be empty")
+        job = _new_job("text")
+        job["draft"] = draft
+        job["system_prompt"] = system_prompt
 
+    asyncio.create_task(_run_job(job["id"]))
+    return JSONResponse(status_code=202, content={"job_id": job["id"], "status": "running"})
+
+
+@app.get("/rewrite/{job_id}", tags=["rewrite"], summary="Check a rewrite job's status")
+def rewrite_status(job_id: str):
+    job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found or expired")
+    if job["status"] == "done":
+        if job["kind"] == "text":
+            return {"job_id": job_id, "status": "done", "rewritten": job["result"]}
+        return {
+            "job_id": job_id,
+            "status": "done",
+            "download_url": f"/rewrite/{job_id}/download",
+        }
+    if job["status"] == "error":
+        return {"job_id": job_id, "status": "error", "error": job["error"]}
+    return {"job_id": job_id, "status": job["status"]}
+
+
+@app.get("/rewrite/{job_id}/download", tags=["rewrite"], summary="Download a finished file rewrite")
+def rewrite_download(job_id: str):
+    job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found or expired")
+    if job["status"] != "done" or job["kind"] != "file":
+        raise HTTPException(status_code=404, detail="Result not ready")
     return Response(
-        content=result_bytes,
+        content=job["result"],
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="{out_name}"'},
+        headers={"Content-Disposition": f'attachment; filename="{job["out_name"]}"'},
     )
 
 

@@ -49,6 +49,10 @@ uvicorn api.main:app --reload --port 8000
 
 ### `POST /rewrite`
 
+Submits a rewrite **job** and returns `202` with a `job_id` immediately. The rewrite
+runs in the background, so the request never hangs past Cloudflare-style gateway timeouts.
+Poll `GET /rewrite/{job_id}` until `status` is `done` or `error`, then download the result.
+
 Accepts `multipart/form-data`. Provide exactly one of `draft` or `file`.
 
 | Field | Type | Required | Description |
@@ -57,20 +61,31 @@ Accepts `multipart/form-data`. Provide exactly one of `draft` or `file`.
 | `file` | file | if no `draft` | A `.docx` or `.pdf` file to rewrite |
 | `system_prompt_override` | string | no | Replaces the default author-style prompt |
 
-- **`draft` input** → JSON `{ "rewritten": "..." }`
-- **`file` input** → downloadable `.docx` (attachment named `<original>_rewritten.docx`)
+- **`POST /rewrite`** → `202 { "job_id": "...", "status": "running" }`
+- **`GET /rewrite/{job_id}`** → `{ "status": "pending" | "running" | "done" | "error", ... }`
+  - `draft` jobs: when `done`, includes `{ "rewritten": "..." }`
+  - `file` jobs: when `done`, includes `{ "download_url": "/rewrite/{job_id}/download" }`
+- **`GET /rewrite/{job_id}/download`** → the rewritten `.docx` (attachment named `<original>_rewritten.docx`)
 
 Examples:
 
 ```bash
+# submit a text job
 curl -X POST http://localhost:8000/rewrite \
   -F 'draft=The quick brown fox jumps over the lazy dog.'
+# -> 202 {"job_id":"abc123","status":"running"}
+curl http://localhost:8000/rewrite/abc123
+# -> {"job_id":"abc123","status":"done","rewritten":"..."}
 
-curl -X POST http://localhost:8000/rewrite \
-  -F 'file=@draft.docx'
+# submit a file job
+curl -X POST http://localhost:8000/rewrite -F 'file=@draft.docx'
+# -> 202 {"job_id":"def456","status":"running"}
+curl http://localhost:8000/rewrite/def456
+# -> {"job_id":"def456","status":"done","download_url":"/rewrite/def456/download"}
+curl -O http://localhost:8000/rewrite/def456/download
 ```
 
-Errors return JSON with a `detail` field: `400` for missing/empty input or unsupported file types, `500` if the rewrite pipeline fails.
+Errors return JSON with a `detail` field: `400` for missing/empty input or unsupported file types, `404` for unknown/expired jobs, `500` if the rewrite pipeline fails.
 
 ## Configuration (environment variables)
 
