@@ -6,7 +6,7 @@ import time
 from . import config
 
 _groq_client = None
-_gemini_client = None
+_gemini_clients: dict[str, object] = {}
 _model_index = 0
 
 _client_lock = threading.Lock()
@@ -32,16 +32,30 @@ def _get_groq_client():
 
 
 def get_client():
-    global _gemini_client
-    if config.LLM_PROVIDER == "gemini":
-        if _gemini_client is None:
-            with _client_lock:
-                if _gemini_client is None:
-                    from google import genai
-
-                    _gemini_client = genai.Client(api_key=os.getenv(config.GEMINI_API_KEY))
-        return _gemini_client
+    keys = _api_keys()
+    if config.LLM_PROVIDER == "gemini" and keys:
+        return _get_gemini_client(keys[0])
     return _get_groq_client()
+
+
+def _api_keys():
+    names = ("GEMINI_API_KEY", "GEMINI_API_KEY2")
+    seen = []
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value and value not in seen:
+            seen.append(value)
+    return seen
+
+
+def _get_gemini_client(api_key: str):
+    if api_key not in _gemini_clients:
+        with _client_lock:
+            if api_key not in _gemini_clients:
+                from google import genai
+
+                _gemini_clients[api_key] = genai.Client(api_key=api_key)
+    return _gemini_clients[api_key]
 
 
 def _available_models():
@@ -51,10 +65,17 @@ def _available_models():
     return [config.GEMINI_MODEL] + [m for m in DEFAULT_GEMINI_MODELS if m != config.GEMINI_MODEL]
 
 
-def _current_model():
+def _rotation_pairs():
+    keys = _api_keys()
+    if not keys:
+        return []
+    return [(key, model) for model in _available_models() for key in keys]
+
+
+def _current_pair():
     with _model_lock:
-        models = _available_models()
-        return models[_model_index % len(models)]
+        pairs = _rotation_pairs()
+        return pairs[_model_index % len(pairs)] if pairs else (None, None)
 
 
 def _advance_model():
@@ -91,10 +112,10 @@ def _groq_available() -> bool:
     return bool(os.getenv(config.GROQ_API_KEY))
 
 
-def _gemini_generate(model: str, prompt: str, system_prompt: str, temperature: float) -> str:
+def _gemini_generate(api_key: str, model: str, prompt: str, system_prompt: str, temperature: float) -> str:
     from google.genai import types
 
-    client = get_client()
+    client = _get_gemini_client(api_key)
     chat = client.chats.create(
         model=model,
         config=types.GenerateContentConfig(
@@ -108,26 +129,30 @@ def _gemini_generate(model: str, prompt: str, system_prompt: str, temperature: f
 
 def _ask_gemini(prompt: str, system_prompt: str, temperature: float) -> str:
     last_err = None
-    attempts_per_model = 3
+    attempts_per_pair = 3
     budget = 55.0
     start = time.monotonic()
 
     def _remaining() -> float:
         return budget - (time.monotonic() - start)
 
-    for _ in range(len(_available_models())):
+    for _ in range(len(_rotation_pairs())):
         if _remaining() <= 0:
             break
-        model = _current_model()
-        for attempt in range(attempts_per_model):
+        api_key, model = _current_pair()
+        if not api_key:
+            break
+        for attempt in range(attempts_per_pair):
             if _remaining() <= 0:
                 break
             try:
-                return _gemini_generate(model, prompt, system_prompt, temperature)
+                return _gemini_generate(api_key, model, prompt, system_prompt, temperature)
             except Exception as e:
                 msg = str(e)
                 if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
                     last_err = e
+                    if "quota" in msg.lower() and "billing" in msg.lower():
+                        break
                     delay = min(_retry_delay(msg), 10.0)
                     if 0 < delay < _remaining():
                         time.sleep(delay)
@@ -146,7 +171,7 @@ def _ask_gemini(prompt: str, system_prompt: str, temperature: float) -> str:
         _advance_model()
     if last_err is not None:
         raise last_err
-    raise RuntimeError("No Gemini model available")
+    raise RuntimeError("No Gemini key/model available")
 
 
 def _ask_groq(prompt: str, system_prompt: str, temperature: float) -> str:
