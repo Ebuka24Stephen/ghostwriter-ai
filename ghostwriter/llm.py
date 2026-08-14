@@ -64,7 +64,7 @@ def _advance_model():
 
 
 def _retry_delay(message: str) -> float:
-    m = re.search(r"retry in ([\d.]+)s", message, re.IGNORECASE)
+    m = re.search(r"(?:retry|try again) in ([\d.]+)s", message, re.IGNORECASE)
     return float(m.group(1)) if m else 15.0
 
 
@@ -78,8 +78,13 @@ def _is_model_unavailable(e: Exception) -> bool:
     return "404" in msg or "NOT_FOUND" in msg
 
 
+def _is_overloaded(e: Exception) -> bool:
+    msg = str(e)
+    return "503" in msg or "UNAVAILABLE" in msg
+
+
 def _is_fallback_error(e: Exception) -> bool:
-    return _is_quota_error(e) or _is_model_unavailable(e)
+    return _is_quota_error(e) or _is_model_unavailable(e) or _is_overloaded(e)
 
 
 def _groq_available() -> bool:
@@ -130,9 +135,10 @@ def _ask_gemini(prompt: str, system_prompt: str, temperature: float) -> str:
                     break
                 if "503" in msg or "UNAVAILABLE" in msg:
                     last_err = e
-                    if attempt < attempts_per_model - 1:
-                        time.sleep(min(3 * (attempt + 1), max(_remaining(), 0)))
-                    continue
+                    if attempt == 0:
+                        time.sleep(min(2.0, max(_remaining(), 0)))
+                        continue
+                    break
                 if "404" in msg or "NOT_FOUND" in msg:
                     last_err = e
                     break
@@ -149,12 +155,25 @@ def _ask_groq(prompt: str, system_prompt: str, temperature: float) -> str:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
-    response = _get_groq_client().chat.completions.create(
-        model=config.LLM_MODEL,
-        messages=messages,
-        temperature=temperature,
-    )
-    return response.choices[0].message.content.strip()
+    last_err = None
+    for attempt in range(3):
+        try:
+            response = _get_groq_client().chat.completions.create(
+                model=config.LLM_MODEL,
+                messages=messages,
+                temperature=temperature,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            last_err = e
+            msg = str(e)
+            if "429" in msg or "RATE_LIMIT" in msg or "rate limit" in msg.lower():
+                delay = min(_retry_delay(msg), 10.0)
+                if attempt < 2 and delay <= 10.0:
+                    time.sleep(delay)
+                    continue
+            raise
+    raise last_err
 
 
 def ask(prompt: str, system_prompt: str = None, temperature: float = 0.4) -> str:
