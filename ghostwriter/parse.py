@@ -5,6 +5,8 @@ from pathlib import Path
 import docx
 from pypdf import PdfReader
 
+from .pagination import apply_pagination
+
 
 def parse_docx(file_bytes: bytes) -> str:
     doc = docx.Document(io.BytesIO(file_bytes))
@@ -50,6 +52,7 @@ def _make_docx_from_text(text: str) -> bytes:
         para = re.sub(r"\n", " ", para).strip()
         if para:
             doc.add_paragraph(para)
+    apply_pagination(doc)
     out = io.BytesIO()
     doc.save(out)
     out.seek(0)

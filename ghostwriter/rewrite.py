@@ -7,6 +7,7 @@ from docx import Document
 from docx.oxml.ns import qn
 
 from . import config, llm
+from .pagination import apply_pagination
 
 
 def is_heading(text):
@@ -439,6 +440,7 @@ def rewrite_docx(file_bytes: bytes, system_prompt: str) -> bytes:
         p_elem = original[i]._p
         p_elem.getparent().remove(p_elem)
 
+    apply_pagination(doc)
     buf = io.BytesIO()
     doc.save(buf)
     buf.seek(0)
