@@ -17,7 +17,6 @@ DEFAULT_GEMINI_MODELS = [
     "gemini-3.5-flash",
     "gemini-3-flash-preview",
     "gemini-flash-latest",
-    "gemini-2.0-flash",
 ]
 
 
@@ -74,6 +73,15 @@ def _is_quota_error(e: Exception) -> bool:
     return "429" in msg or "RESOURCE_EXHAUSTED" in msg
 
 
+def _is_model_unavailable(e: Exception) -> bool:
+    msg = str(e)
+    return "404" in msg or "NOT_FOUND" in msg
+
+
+def _is_fallback_error(e: Exception) -> bool:
+    return _is_quota_error(e) or _is_model_unavailable(e)
+
+
 def _groq_available() -> bool:
     return bool(os.getenv(config.GROQ_API_KEY))
 
@@ -115,6 +123,9 @@ def _ask_gemini(prompt: str, system_prompt: str, temperature: float) -> str:
                     if attempt < attempts_per_model - 1:
                         time.sleep(3 * (attempt + 1))
                     continue
+                if "404" in msg or "NOT_FOUND" in msg:
+                    last_err = e
+                    break
                 raise
         _advance_model()
     if last_err is not None:
@@ -141,16 +152,16 @@ def ask(prompt: str, system_prompt: str = None, temperature: float = 0.4) -> str
         try:
             return _ask_gemini(prompt, system_prompt, temperature)
         except Exception as e:
-            if not _is_quota_error(e):
+            if not _is_fallback_error(e):
                 raise
             if _groq_available():
                 try:
                     return _ask_groq(prompt, system_prompt, temperature)
                 except Exception as groq_err:
                     raise RuntimeError(
-                        f"Gemini API quota exhausted and Groq fallback failed: {groq_err}"
+                        f"Gemini API unavailable and Groq fallback failed: {groq_err}"
                     ) from e
             raise RuntimeError(
-                "Gemini API quota exhausted and no GROQ_API_KEY is set for automatic fallback."
+                "Gemini API unavailable and no GROQ_API_KEY is set for automatic fallback."
             ) from e
     return _ask_groq(prompt, system_prompt, temperature)
