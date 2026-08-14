@@ -90,38 +90,48 @@ def _gemini_generate(model: str, prompt: str, system_prompt: str, temperature: f
     from google.genai import types
 
     client = get_client()
-    response = client.models.generate_content(
+    chat = client.chats.create(
         model=model,
-        contents=prompt,
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
             temperature=temperature,
         ),
     )
+    response = chat.send_message(prompt)
     return response.text.strip()
 
 
 def _ask_gemini(prompt: str, system_prompt: str, temperature: float) -> str:
     last_err = None
     attempts_per_model = 3
+    budget = 55.0
+    start = time.monotonic()
+
+    def _remaining() -> float:
+        return budget - (time.monotonic() - start)
+
     for _ in range(len(_available_models())):
+        if _remaining() <= 0:
+            break
         model = _current_model()
         for attempt in range(attempts_per_model):
+            if _remaining() <= 0:
+                break
             try:
                 return _gemini_generate(model, prompt, system_prompt, temperature)
             except Exception as e:
                 msg = str(e)
                 if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
                     last_err = e
-                    delay = _retry_delay(msg)
-                    if delay <= 10.0:
+                    delay = min(_retry_delay(msg), 10.0)
+                    if 0 < delay < _remaining():
                         time.sleep(delay)
                         continue
                     break
                 if "503" in msg or "UNAVAILABLE" in msg:
                     last_err = e
                     if attempt < attempts_per_model - 1:
-                        time.sleep(3 * (attempt + 1))
+                        time.sleep(min(3 * (attempt + 1), max(_remaining(), 0)))
                     continue
                 if "404" in msg or "NOT_FOUND" in msg:
                     last_err = e
