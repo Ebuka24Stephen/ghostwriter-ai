@@ -7,6 +7,7 @@ _CAPTION_RE = re.compile(r"^(?:Table|Figure|Fig\.?|Illustration)\b", re.IGNORECA
 _HEADING_TEXT_RE = re.compile(r"^(?:CHAPTER\b|\d+(?:\.\d+)*\s+[A-Z])")
 _MAJOR_HEADING_RE = re.compile(r"^CHAPTER\b", re.IGNORECASE)
 _REFERENCE_HEADING_RE = re.compile(r"^(?:(?:LIST OF )?REFERENCES|BIBLIOGRAPHY|WORKS CITED)\b", re.IGNORECASE)
+_TOC_RE = re.compile(r"^TABLE\s+OF\s+CONTENTS\b", re.IGNORECASE)
 _SHORT_WORDS = 30
 
 
@@ -42,6 +43,11 @@ def _is_major_heading(p):
 def _is_reference_heading(p):
     text = p.text.strip()
     return bool(text) and len(text) < 60 and bool(_REFERENCE_HEADING_RE.match(text))
+
+
+def _is_toc_heading(p):
+    text = p.text.strip()
+    return bool(text) and len(text) < 60 and bool(_TOC_RE.match(text))
 
 
 def _has_page_break_before(p):
@@ -108,7 +114,7 @@ def apply_pagination(doc):
         pf.widow_control = True
         text = p.text.strip()
 
-        if (_is_major_heading(p) or _is_reference_heading(p)) and idx > 0:
+        if (_is_major_heading(p) or _is_reference_heading(p) or _is_toc_heading(p)) and idx > 0:
             j = idx - 1
             while j >= 0 and not paras[j].text.strip():
                 j -= 1
@@ -127,7 +133,7 @@ def apply_pagination(doc):
                     if ppr.find(qn("w:pageBreakBefore")) is None:
                         ppr.insert(0, OxmlElement("w:pageBreakBefore"))
 
-        if _is_heading_paragraph(p) or _is_reference_heading(p):
+        if _is_heading_paragraph(p) or _is_reference_heading(p) or _is_toc_heading(p):
             pf.keep_with_next = True
             pf.keep_together = True
             continue
