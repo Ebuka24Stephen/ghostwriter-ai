@@ -4,9 +4,10 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 
 from docx import Document
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-from . import config, llm
+from . import config, llm, citations
 from .pagination import apply_pagination
 
 
@@ -156,7 +157,7 @@ def cap_document(input_doc, output_text):
             capped.append(cap_paragraph(op, in_paras[i]))
         else:
             capped.append(op)
-    return normalize_spacing("\n\n".join(capped))
+    return "\n\n".join(normalize_spacing(c) for c in capped)
 
 
 _TAIL_PATTERNS = [
@@ -237,6 +238,7 @@ Rules:
 - Do NOT add new facts, examples, or ideas
 - Do NOT append any new clause that adds evaluation, commentary, or a conclusion (no "and this is...", "thus ...ing", "which is...", or similar)
 - Keep all facts, numbers, and any citation exactly as written inside its parentheses, e.g. "(Ismail et al., 2023)"
+- Keep any {{CIT_n}} placeholder exactly as written, wherever it appears in the sentence
 - Match the original's length roughly, not exactly — the goal is different wording, not different size
 - Use the "(Between: ...)" context only to fit the sentence naturally; never copy words from it into your rewritten sentence
 - Self-check before answering: compare each sentence you wrote against the author's example passages in the system prompt. If it sounds too clean, smooth, modern, or AI-like, rewrite it again internally. Also confirm it is NOT a near-copy of the original sentence
@@ -319,7 +321,7 @@ def rewrite_document(document, system_prompt):
 
 Rules:
 - Change at least half the words; reorder the clauses; do not keep the original's phrasing
-- Keep all facts and any citation exactly
+- Keep all facts and any citation exactly; keep any {{CIT_n}} placeholder exactly as written
 - Do not add new ideas or append evaluative clauses
 - Return only the numbered rewritten sentences, nothing else"""
         result = llm.ask(prompt, system_prompt=system_prompt, temperature=config.REWRITE_TEMPERATURE)
@@ -348,7 +350,65 @@ def _has_picture(elem):
     )
 
 
-def _replace_paragraph_text(paragraph, new_text):
+def _is_heading_paragraph(p):
+    style = p.style.name if p.style is not None else ""
+    if "Heading" in style or "Caption" in style:
+        return True
+    return is_heading(p.text)
+
+
+def _sentence_bold_info(text, run_spans):
+    sents = split_sentences(text)
+    if not sents:
+        return []
+    spans = []
+    pos = 0
+    for s in sents:
+        start = text.find(s, pos)
+        if start < 0:
+            start = pos
+        spans.append((start, start + len(s)))
+        pos = start + len(s)
+    info = []
+    for k, (s0, s1) in enumerate(spans):
+        bold_ranges = []
+        for r0, r1, b in run_spans:
+            if b and r1 > r0:
+                a, c = max(s0, r0), min(s1, r1)
+                if a < c:
+                    bold_ranges.append((a - s0, c - s0))
+        info.append((sents[k], bold_ranges))
+    return info
+
+
+def _ranges_cover(ranges, length):
+    merged = []
+    for a, b in sorted(ranges):
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return bool(merged) and merged[0][0] <= 0 and merged[-1][1] >= length
+
+
+def _segments_for_partial(out_s, src_s, bold_ranges):
+    pos = 0
+    pieces = []
+    for s0, s1 in bold_ranges:
+        bold_txt = src_s[s0:s1]
+        idx = out_s.find(bold_txt, pos)
+        if idx < 0:
+            return None
+        if idx > pos:
+            pieces.append((out_s[pos:idx], False))
+        pieces.append((out_s[idx:idx + len(bold_txt)], True))
+        pos = idx + len(bold_txt)
+    if pos < len(out_s):
+        pieces.append((out_s[pos:], False))
+    return pieces
+
+
+def _replace_paragraph_text(paragraph, new_text, bold_segments=None, citation_records=None):
     p_elem = paragraph._p
     template_rpr = None
     image_children = []
@@ -364,23 +424,71 @@ def _replace_paragraph_text(paragraph, new_text):
             image_children.append(child)
             continue
         if template_rpr is None:
-            for r in child.iter(qn("w:r")):
-                rpr = r.find(qn("w:rPr"))
+            if child.tag == qn("w:r"):
+                rpr = child.find(qn("w:rPr"))
                 if rpr is not None:
                     template_rpr = rpr
-                    break
+            elif child.tag == qn("w:hyperlink"):
+                for r in child.findall(qn("w:r")):
+                    rpr = r.find(qn("w:rPr"))
+                    if rpr is not None:
+                        template_rpr = rpr
+                        break
         p_elem.remove(child)
 
-    run = paragraph.add_run(new_text)
-    if template_rpr is not None:
-        run._element.insert(0, deepcopy(template_rpr))
+    if bold_segments is None:
+        bold_segments = [(new_text, None)]
 
-    if image_children:
-        image_children[0].addprevious(run._element)
-    else:
-        ppr = p_elem.find(qn("w:pPr"))
-        if ppr is not None:
-            ppr.addnext(run._element)
+    citation_map = {ph: elem for ph, elem, _ in (citation_records or [])}
+    used = set()
+
+    new_nodes = []
+    for seg_text, bold in bold_segments:
+        for piece, ph in citations.split_placeholders(seg_text):
+            if ph is not None:
+                elem = citation_map.get(ph)
+                if elem is not None:
+                    new_nodes.append(deepcopy(elem))
+                    used.add(ph)
+                continue
+            if not piece:
+                continue
+            run = paragraph.add_run(piece)
+            rpr = deepcopy(template_rpr) if template_rpr is not None else None
+            if bold is not None:
+                if rpr is None:
+                    rpr = OxmlElement("w:rPr")
+                b = rpr.find(qn("w:b"))
+                if b is None:
+                    b = OxmlElement("w:b")
+                    rpr.insert(0, b)
+                b.set(qn("w:val"), "1" if bold else "0")
+            if rpr is not None:
+                run._element.insert(0, rpr)
+            new_nodes.append(run._element)
+
+    for ph, elem, _ in citation_records or []:
+        if ph not in used:
+            new_nodes.append(deepcopy(elem))
+
+    for n in new_nodes:
+        if n.tag == qn("w:r"):
+            p_elem.remove(n)
+
+    anchor = p_elem.find(qn("w:pPr"))
+    for bm in p_elem.findall(qn("w:bookmarkStart")):
+        anchor = bm
+    if anchor is None and len(p_elem):
+        anchor = p_elem[-1]
+    for n in new_nodes:
+        if anchor is not None:
+            anchor.addnext(n)
+            anchor = n
+        else:
+            p_elem.insert(0, n)
+            anchor = n
+    for img in image_children:
+        p_elem.append(img)
     return paragraph
 
 
@@ -389,38 +497,49 @@ def rewrite_docx(file_bytes: bytes, system_prompt: str) -> bytes:
     original = list(doc.paragraphs)
 
     raw = []
+    cite_counter = [0]
     for i, p in enumerate(original):
-        text = re.sub(r"\n", " ", p.text).strip()
+        visible_text, records, run_spans = citations.extract(p, cite_counter)
+        text = re.sub(r"\n", " ", visible_text).strip()
         if not text:
             continue
-        if is_heading(text):
+        if _is_heading_paragraph(p):
             continue
-        raw.append((text, i))
+        info = _sentence_bold_info(re.sub(r"\n", " ", visible_text), run_spans)
+        raw.append((text, i, info, records))
 
     merged = []
     consumed = set()
-    for text, i in raw:
+    for text, i, info, records in raw:
         if (
             merged
             and not re.search(r"[.!?]\s*$", merged[-1][0])
             and re.match(r"^[a-z]", text)
         ):
-            merged[-1] = (merged[-1][0] + " " + text, merged[-1][1])
+            prev_text, prev_i, prev_info, prev_records = merged[-1]
+            merged[-1] = (
+                prev_text + " " + text,
+                prev_i,
+                prev_info + info,
+                prev_records + records,
+            )
             consumed.add(i)
         else:
-            merged.append((text, i))
+            merged.append((text, i, info, records))
 
-    body = [(t, i) for t, i in merged if len(t) >= 20]
+    body = [(t, i, f, r) for t, i, f, r in merged if len(t) >= 20]
 
     seen = []
     filtered = []
-    for text, i in body:
+    for text, i, info, records in body:
         if not _para_is_dup(text, seen):
-            filtered.append((text, i))
+            filtered.append((text, i, info, records))
             seen.append(text)
-    body_paras = [t for t, _ in filtered]
-    body_indices = {i for _, i in filtered}
-    body_sources = {i: t for t, i in filtered}
+    body_paras = [t for t, _, _, _ in filtered]
+    body_indices = {i for _, i, _, _ in filtered}
+    body_sources = {i: t for t, i, _, _ in filtered}
+    body_info = {i: f for _, i, f, _ in filtered}
+    body_citations = {i: r for _, i, _, r in filtered}
 
     rewritten_body = rewrite_document("\n\n".join(body_paras), system_prompt)
     rewritten_paras = [p.strip() for p in rewritten_body.split("\n\n") if p.strip()]
@@ -433,7 +552,27 @@ def rewrite_docx(file_bytes: bytes, system_prompt: str) -> bytes:
         if not text:
             continue
         rewritten = rewritten_paras[idx] if idx < len(rewritten_paras) else text
-        _replace_paragraph_text(p, cap_paragraph(rewritten, body_sources.get(i, text)))
+        final_text = cap_paragraph(rewritten, body_sources.get(i, text))
+        info = body_info.get(i, [])
+        records = body_citations.get(i, [])
+        out_sents = split_sentences(final_text)
+        if info and len(out_sents) <= len(info):
+            segments = []
+            for n, out_s in enumerate(out_sents):
+                src_s, bold_ranges = info[n]
+                if not bold_ranges:
+                    segments.append((out_s, False))
+                elif _ranges_cover(bold_ranges, len(src_s)):
+                    segments.append((out_s, True))
+                else:
+                    pieces = _segments_for_partial(out_s, src_s, bold_ranges)
+                    segments.extend(pieces if pieces is not None else [(out_s, True)])
+                if n < len(out_sents) - 1:
+                    seg_text, seg_bold = segments[-1]
+                    segments[-1] = (seg_text + " ", seg_bold)
+            _replace_paragraph_text(p, final_text, bold_segments=segments, citation_records=records)
+        else:
+            _replace_paragraph_text(p, final_text, citation_records=records)
         idx += 1
 
     for i in sorted(consumed, reverse=True):
