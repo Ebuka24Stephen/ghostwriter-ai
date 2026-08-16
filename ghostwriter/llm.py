@@ -30,8 +30,12 @@ def get_client():
 
 
 def _api_keys():
-    key = os.getenv(config.GEMINI_API_KEY, "").strip()
-    return [key] if key else []
+    seen = []
+    for name in (config.GEMINI_API_KEY, config.GEMINI_API_KEY2):
+        value = os.getenv(name, "").strip()
+        if value and value not in seen:
+            seen.append(value)
+    return seen
 
 
 def _get_gemini_client(api_key: str):
@@ -70,7 +74,7 @@ def _is_server_error(e: Exception) -> bool:
 
 
 def _is_fallback_error(e: Exception) -> bool:
-    return _is_quota_error(e) or _is_model_unavailable(e) or _is_overloaded(e) or _is_server_error(e)
+    return _is_model_unavailable(e) or _is_server_error(e)
 
 
 def _groq_available() -> bool:
@@ -81,30 +85,71 @@ def _gemini_generate(api_key: str, model: str, prompt: str, system_prompt: str, 
     from google.genai import types
 
     client = _get_gemini_client(api_key)
-    chat = client.chats.create(
+    response = client.models.generate_content(
         model=model,
+        contents=prompt,
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
             temperature=temperature,
         ),
     )
-    response = chat.send_message(prompt)
     return response.text.strip()
+
+
+DEFAULT_GEMINI_MODELS = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
+    "gemini-flash-latest",
+]
+
+
+def _available_models():
+    raw = os.environ.get("GEMINI_MODELS", "")
+    if raw:
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    return [config.GEMINI_MODEL] + [m for m in DEFAULT_GEMINI_MODELS if m != config.GEMINI_MODEL]
 
 
 def _ask_gemini(prompt: str, system_prompt: str, temperature: float) -> str:
     keys = _api_keys()
     if not keys:
         raise RuntimeError("No GEMINI_API_KEY set")
-    api_key = keys[0]
-    model = config.GEMINI_MODEL
+    last_err = None
+    deadline = time.monotonic() + 90.0
+    for model in _available_models():
+        if time.monotonic() >= deadline:
+            break
+        for api_key in keys:
+            try:
+                return _ask_gemini_with_key(
+                    api_key, model, prompt, system_prompt, temperature, deadline
+                )
+            except Exception as e:
+                last_err = e
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("No Gemini key/model available")
+
+
+def _ask_gemini_with_key(
+    api_key: str,
+    model: str,
+    prompt: str,
+    system_prompt: str,
+    temperature: float,
+    deadline: float | None = None,
+) -> str:
     last_err = None
     attempts = 3
     budget = 55.0
     start = time.monotonic()
 
     def _remaining() -> float:
-        return budget - (time.monotonic() - start)
+        left = budget - (time.monotonic() - start)
+        if deadline is not None:
+            left = min(left, deadline - time.monotonic())
+        return left
 
     for attempt in range(attempts):
         if _remaining() <= 0:
