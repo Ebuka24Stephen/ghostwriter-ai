@@ -8,7 +8,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 from . import config, llm, citations
-from .pagination import apply_pagination
+from .pagination import _is_caption, apply_pagination
 
 
 def is_heading(text):
@@ -502,6 +502,8 @@ def rewrite_docx(file_bytes: bytes, system_prompt: str) -> bytes:
         visible_text, records, run_spans = citations.extract(p, cite_counter)
         text = re.sub(r"\n", " ", visible_text).strip()
         if not text:
+            continue
+        if _is_caption(text):
             continue
         if _is_heading_paragraph(p):
             continue

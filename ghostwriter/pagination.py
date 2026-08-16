@@ -8,6 +8,7 @@ _HEADING_TEXT_RE = re.compile(r"^(?:CHAPTER\b|\d+(?:\.\d+)*\s+[A-Z])")
 _MAJOR_HEADING_RE = re.compile(r"^CHAPTER\b", re.IGNORECASE)
 _REFERENCE_HEADING_RE = re.compile(r"^(?:(?:LIST OF )?REFERENCES|BIBLIOGRAPHY|WORKS CITED)\b", re.IGNORECASE)
 _TOC_RE = re.compile(r"^TABLE\s+OF\s+CONTENTS\b", re.IGNORECASE)
+_SECTION_SDT_GALLERIES = ("Table of Contents", "Bibliographies")
 _SHORT_WORDS = 30
 
 
@@ -161,6 +162,7 @@ def apply_pagination(doc):
             if tr_pr.find(qn("w:cantSplit")) is None:
                 tr_pr.append(OxmlElement("w:cantSplit"))
 
+    _fresh_page_before_section_sdts(doc)
     _remove_blank_page_risks(doc)
 
 
@@ -181,3 +183,36 @@ def _remove_blank_page_risks(doc):
     for p in paras:
         if id(p._p) in doomed:
             p._p.getparent().remove(p._p)
+
+
+def _sdt_gallery(sdt_elem):
+    sdt_pr = sdt_elem.find(qn("w:sdtPr"))
+    if sdt_pr is None:
+        return None
+    obj = sdt_pr.find(qn("w:docPartObj"))
+    if obj is None:
+        return None
+    gal = obj.find(qn("w:docPartGallery"))
+    if gal is None:
+        return None
+    return gal.get(qn("w:val"))
+
+
+def _fresh_page_before_section_sdts(doc):
+    for child in doc.element.body.iterchildren():
+        if child.tag != qn("w:sdt"):
+            continue
+        if _sdt_gallery(child) not in _SECTION_SDT_GALLERIES:
+            continue
+        content = child.find(qn("w:sdtContent"))
+        if content is None:
+            continue
+        first_p = content.find(qn("w:p"))
+        if first_p is None:
+            continue
+        ppr = first_p.find(qn("w:pPr"))
+        if ppr is None:
+            ppr = first_p.makeelement(qn("w:pPr"), {})
+            first_p.insert(0, ppr)
+        if ppr.find(qn("w:pageBreakBefore")) is None:
+            ppr.insert(0, OxmlElement("w:pageBreakBefore"))
