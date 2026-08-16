@@ -8,7 +8,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 from . import config, llm, citations
-from .pagination import _is_caption, apply_pagination
+from .pagination import _LISTING_HEADING_RE, _has_inline_caption, _is_caption, _title_page_end, apply_pagination
 
 
 def is_heading(text):
@@ -20,6 +20,8 @@ def is_heading(text):
     if len(stripped) < 60 and re.match(r"^[A-Z][A-Z\s\d\.]+$", stripped):
         return True
     if len(stripped) < 60 and re.match(r"^CHAPTER\s", stripped, re.IGNORECASE):
+        return True
+    if len(stripped) < 60 and _LISTING_HEADING_RE.match(stripped):
         return True
     if len(stripped) < 60 and re.match(r"^\d+\.\d+", stripped):
         return True
@@ -492,6 +494,79 @@ def _replace_paragraph_text(paragraph, new_text, bold_segments=None, citation_re
     return paragraph
 
 
+_TOC_ENTRY_STYLES = {
+    "TableofFigures", "TableofTables", "TOCHeading",
+    "TOC1", "TOC2", "TOC3", "TOC4", "TOC5",
+    "TOC6", "TOC7", "TOC8", "TOC9", "TOC10",
+}
+
+
+def _is_toc_entry_paragraph(p, fld_tag, instr_tag):
+    if next(p.iter(fld_tag), None) is not None:
+        return True
+    if next(p.iter(instr_tag), None) is not None:
+        return True
+    pPr = p.find(qn("w:pPr"))
+    if pPr is not None:
+        style = pPr.find(qn("w:pStyle"))
+        if style is not None and style.get(qn("w:val")) in _TOC_ENTRY_STYLES:
+            return True
+    text = "".join(t.text or "" for t in p.iter(qn("w:t")))
+    return bool(re.match(r"^(Figure|Table|Illustration|Fig\.?)\s*\d+", text.strip()))
+
+
+def close_unclosed_fields(doc) -> None:
+    body = doc.element.body
+    para_tag = qn("w:p")
+    fld_tag = qn("w:fldChar")
+    instr_tag = qn("w:instrText")
+
+    paras = [el for el in body.iter() if el.tag == para_tag]
+    para_index = {id(p): i for i, p in enumerate(paras)}
+
+    def _para_of(el):
+        parent = el.getparent()
+        while parent is not None and parent.tag != para_tag:
+            parent = parent.getparent()
+        return parent
+
+    open_fields = []
+    for el in body.iter():
+        if el.tag == fld_tag:
+            ftype = el.get(qn("w:fldCharType"))
+            if ftype == "begin":
+                open_fields.append([_para_of(el), None, None])
+            elif ftype == "separate":
+                if open_fields:
+                    open_fields[-1][1] = _para_of(el)
+            elif ftype == "end":
+                if open_fields:
+                    open_fields.pop()
+        elif el.tag == instr_tag and open_fields:
+            if open_fields[-1][2] is None:
+                text = "".join(el.itertext()).strip()
+                if text:
+                    open_fields[-1][2] = text
+
+    for begin_para, sep_para, instr in open_fields:
+        if sep_para is None:
+            sep_para = begin_para
+        if sep_para is None:
+            continue
+        start = para_index.get(id(sep_para), len(paras))
+        end_para = sep_para
+        for p in paras[start + 1:]:
+            if _is_toc_entry_paragraph(p, fld_tag, instr_tag):
+                end_para = p
+            else:
+                break
+        r = OxmlElement("w:r")
+        fld = OxmlElement("w:fldChar")
+        fld.set(qn("w:fldCharType"), "end")
+        r.append(fld)
+        end_para.append(r)
+
+
 def rewrite_docx(file_bytes: bytes, system_prompt: str) -> bytes:
     doc = Document(io.BytesIO(file_bytes))
     original = list(doc.paragraphs)
@@ -505,6 +580,8 @@ def rewrite_docx(file_bytes: bytes, system_prompt: str) -> bytes:
             continue
         if _is_caption(text):
             continue
+        if _has_inline_caption(text) or re.search(r"SEQ (?:Figure|Table)", p._p.xml):
+            continue
         if _is_heading_paragraph(p):
             continue
         info = _sentence_bold_info(re.sub(r"\n", " ", visible_text), run_spans)
@@ -512,9 +589,12 @@ def rewrite_docx(file_bytes: bytes, system_prompt: str) -> bytes:
 
     merged = []
     consumed = set()
+    title_end = _title_page_end(doc) or 0
     for text, i, info, records in raw:
         if (
             merged
+            and i >= title_end
+            and merged[-1][1] >= title_end
             and not re.search(r"[.!?]\s*$", merged[-1][0])
             and re.match(r"^[a-z]", text)
         ):
@@ -579,9 +659,12 @@ def rewrite_docx(file_bytes: bytes, system_prompt: str) -> bytes:
 
     for i in sorted(consumed, reverse=True):
         p_elem = original[i]._p
-        p_elem.getparent().remove(p_elem)
+        for child in list(p_elem):
+            if child.tag != qn("w:pPr"):
+                p_elem.remove(child)
 
     apply_pagination(doc)
+    close_unclosed_fields(doc)
     buf = io.BytesIO()
     doc.save(buf)
     buf.seek(0)
