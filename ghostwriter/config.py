@@ -8,7 +8,6 @@ load_dotenv()
 LLM_PROVIDER = os.environ.get("GHOSTWRITER_PROVIDER", "gemini")
 GROQ_API_KEY = "GROQ_API_KEY"
 GEMINI_API_KEY = "GEMINI_API_KEY"
-GEMINI_API_KEY2 = "GEMINI_API_KEY2"
 LLM_MODEL = "llama-3.3-70b-versatile"
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 KEEP_RATIO = float(os.environ.get("GHOSTWRITER_KEEP_RATIO", "0.4"))
