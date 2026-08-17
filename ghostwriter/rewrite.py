@@ -100,18 +100,28 @@ def plan_keep_indices(n_sentences, keep_ratio=KEEP_RATIO):
     return {min(n_sentences - 1, round(k * step)) for k in range(n_keep)}
 
 
+def _restore_leading_marker(rewritten, original):
+    m = re.match(r"^\s*(\d+[.)]?|[a-zA-Z][.)]|\u2022|[-*])\s+", original)
+    if not m:
+        return rewritten
+    marker = m.group(1)
+    if rewritten.startswith(marker):
+        return rewritten
+    return marker + " " + rewritten.strip()
+
+
 def _parse_numbered(text):
     result = {}
     lines = text.splitlines()
     i = 0
     while i < len(lines):
-        m = re.match(r"^\s*(\d+)[.)]\s+(.*)$", lines[i])
+        m = re.match(r"^\s*(\d+)[.)]?\s+(.*)$", lines[i])
         if m:
             num = int(m.group(1))
             parts = [m.group(2)]
             i += 1
             while i < len(lines):
-                if re.match(r"^\s*\d+[.)]\s+", lines[i]):
+                if re.match(r"^\s*\d+[.)]?\s+", lines[i]):
                     break
                 parts.append(lines[i])
                 i += 1
@@ -241,6 +251,7 @@ Rules:
 - Do NOT append any new clause that adds evaluation, commentary, or a conclusion (no "and this is...", "thus ...ing", "which is...", or similar)
 - Keep all facts, numbers, and any citation exactly as written inside its parentheses, e.g. "(Ismail et al., 2023)"
 - Keep any {{CIT_n}} placeholder exactly as written, wherever it appears in the sentence
+- If the original sentence begins with a list marker or label (e.g. "1", "2.", "•", or "Exponential Capacity Growth:"), keep that marker and label exactly at the start of your rewritten sentence
 - Match the original's length roughly, not exactly — the goal is different wording, not different size
 - Use the "(Between: ...)" context only to fit the sentence naturally; never copy words from it into your rewritten sentence
 - Self-check before answering: compare each sentence you wrote against the author's example passages in the system prompt. If it sounds too clean, smooth, modern, or AI-like, rewrite it again internally. Also confirm it is NOT a near-copy of the original sentence
@@ -284,7 +295,12 @@ def rewrite_document(document, system_prompt):
             continue
         sentences = split_sentences(stripped)
         if len(sentences) < 2:
-            plan.append(sentences)
+            if len(stripped) < 20:
+                plan.append(sentences)
+                continue
+            counter += 1
+            plan.append(["REWRITE:%d" % counter])
+            to_rewrite.append((counter, stripped, None, None))
             continue
         keep_indices = plan_keep_indices(len(sentences))
         para_plan = []
@@ -324,6 +340,7 @@ def rewrite_document(document, system_prompt):
 Rules:
 - Change at least half the words; reorder the clauses; do not keep the original's phrasing
 - Keep all facts and any citation exactly; keep any {{CIT_n}} placeholder exactly as written
+- If the original sentence begins with a list marker or label (e.g. "1", "2.", "•", or "Exponential Capacity Growth:"), keep that marker and label exactly at the start of your rewritten sentence
 - Do not add new ideas or append evaluative clauses
 - Return only the numbered rewritten sentences, nothing else"""
         result = llm.ask(prompt, system_prompt=system_prompt, temperature=config.REWRITE_TEMPERATURE)
@@ -336,6 +353,7 @@ Rules:
             if isinstance(item, str) and item.startswith("REWRITE:"):
                 n = int(item.split(":", 1)[1])
                 rewritten = rewrites.get(n, original_map.get(n, ""))
+                rewritten = _restore_leading_marker(rewritten, original_map.get(n, ""))
                 parts.append(strip_added_tail(rewritten, original_map.get(n, "")))
             else:
                 parts.append(item)

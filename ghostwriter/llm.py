@@ -30,12 +30,12 @@ def get_client():
 
 
 def _api_keys():
-    seen = []
-    for name in (config.GEMINI_API_KEY, config.GEMINI_API_KEY2):
+    keys = []
+    for name in (config.GEMINI_API_SECRET, config.GEMINI_API_KEY):
         value = os.getenv(name, "").strip()
-        if value and value not in seen:
-            seen.append(value)
-    return seen
+        if value:
+            keys.append(value)
+    return keys
 
 
 def _get_gemini_client(api_key: str):
@@ -56,6 +56,19 @@ def _retry_delay(message: str) -> float:
 def _is_quota_error(e: Exception) -> bool:
     msg = str(e)
     return "429" in msg or "RESOURCE_EXHAUSTED" in msg
+
+
+def _is_retryable_quota(e: Exception) -> bool:
+    msg = str(e)
+    return "429" in msg and "perminute" in msg.lower()
+
+
+def _is_connection_error(e: Exception) -> bool:
+    name = type(e).__name__
+    return any(
+        t in name
+        for t in ("Connect", "Timeout", "Protocol", "RemoteProtocol", "Network", "Unavailable")
+    ) or "disconnected" in str(e).lower()
 
 
 def _is_model_unavailable(e: Exception) -> bool:
@@ -97,10 +110,10 @@ def _gemini_generate(api_key: str, model: str, prompt: str, system_prompt: str, 
 
 
 DEFAULT_GEMINI_MODELS = [
+    "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3-flash-preview",
-    "gemini-flash-latest",
 ]
 
 
@@ -116,7 +129,7 @@ def _ask_gemini(prompt: str, system_prompt: str, temperature: float) -> str:
     if not keys:
         raise RuntimeError("No GEMINI_API_KEY set")
     last_err = None
-    deadline = time.monotonic() + 90.0
+    deadline = time.monotonic() + 150.0
     for model in _available_models():
         if time.monotonic() >= deadline:
             break
@@ -161,6 +174,11 @@ def _ask_gemini_with_key(
             if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
                 last_err = e
                 if "quota" in msg.lower() and "billing" in msg.lower():
+                    if _is_retryable_quota(e):
+                        delay = min(_retry_delay(msg), 10.0)
+                        if 0 < delay < _remaining():
+                            time.sleep(delay)
+                            continue
                     break
                 delay = min(_retry_delay(msg), 10.0)
                 if 0 < delay < _remaining():
@@ -169,14 +187,23 @@ def _ask_gemini_with_key(
                 break
             if "503" in msg or "UNAVAILABLE" in msg:
                 last_err = e
-                if attempt == 0:
-                    time.sleep(min(2.0, max(_remaining(), 0)))
+                delay = min([2.0, 4.0, 8.0][attempt], 10.0)
+                if 0 < delay < _remaining():
+                    time.sleep(delay)
                     continue
                 break
             if "500" in msg or "INTERNAL" in msg:
                 last_err = e
-                if attempt == 0:
-                    time.sleep(min(2.0, max(_remaining(), 0)))
+                delay = min([2.0, 4.0, 8.0][attempt], 10.0)
+                if 0 < delay < _remaining():
+                    time.sleep(delay)
+                    continue
+                break
+            if _is_connection_error(e):
+                last_err = e
+                delay = min([2.0, 4.0, 8.0][attempt], 10.0)
+                if 0 < delay < _remaining():
+                    time.sleep(delay)
                     continue
                 break
             if "404" in msg or "NOT_FOUND" in msg:

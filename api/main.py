@@ -94,24 +94,59 @@ def _do_file_rewrite(file_bytes: bytes, filename: str, system_prompt: str) -> by
     return result_bytes
 
 
+def _is_transient_error(e: Exception) -> bool:
+    msg = str(e)
+    name = type(e).__name__
+    return any(
+        t in msg
+        for t in ("503", "UNAVAILABLE", "500", "INTERNAL", "429", "RESOURCE_EXHAUSTED", "quota", "rate limit", "RATE_LIMIT", "disconnected")
+    ) or any(
+        t in name
+        for t in ("Connect", "Timeout", "Protocol", "RemoteProtocol", "Network")
+    )
+
+
+def _friendly_error(e: Exception) -> str:
+    msg = str(e).strip()
+    if not msg:
+        return f"{type(e).__name__}"
+    return f"{type(e).__name__}: {msg}"
+
+
 async def _run_job(job_id: str):
     job = _jobs.get(job_id)
     if job is None:
         return
     job["status"] = "running"
-    try:
+
+    def _run_once():
         if job["kind"] == "text":
-            job["result"] = await asyncio.to_thread(
+            return asyncio.to_thread(
                 _do_text_rewrite, job["draft"], job["system_prompt"]
             )
-        else:
-            job["result"] = await asyncio.to_thread(
-                _do_file_rewrite, job["file_bytes"], job["filename"], job["system_prompt"]
-            )
-        job["status"] = "done"
-    except Exception as e:
-        job["status"] = "error"
-        job["error"] = f"{type(e).__name__}: {e}"
+        return asyncio.to_thread(
+            _do_file_rewrite, job["file_bytes"], job["filename"], job["system_prompt"]
+        )
+
+    backoffs = [30, 60]
+    for attempt in range(3):
+        try:
+            job["result"] = await _run_once()
+            job["status"] = "done"
+            return
+        except Exception as e:
+            if not _is_transient_error(e) or attempt >= len(backoffs):
+                job["status"] = "error"
+                job["error"] = _friendly_error(e)
+                return
+            time.sleep(backoffs[attempt])
+
+    job["status"] = "error"
+    job["error"] = (
+        "The rewrite could not be completed because Gemini was temporarily "
+        "overloaded or rate-limited after several attempts. Please wait a few "
+        "minutes and try again."
+    )
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
