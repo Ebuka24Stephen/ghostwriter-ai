@@ -31,7 +31,7 @@ def get_client():
 
 def _api_keys():
     keys = []
-    for name in (config.GEMINI_API_SECRET, config.GEMINI_API_KEY):
+    for name in (config.GEMINI_API_SECRET, config.GEMINI_API_KEY, config.GEMINI_API_KEY2):
         value = os.getenv(name, "").strip()
         if value:
             keys.append(value)
@@ -111,9 +111,6 @@ def _gemini_generate(api_key: str, model: str, prompt: str, system_prompt: str, 
 
 DEFAULT_GEMINI_MODELS = [
     "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
-    "gemini-3-flash-preview",
 ]
 
 
