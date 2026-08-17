@@ -62,8 +62,8 @@ def _cleanup_jobs():
         _jobs.pop(jid, None)
 
 
-def _do_text_rewrite(draft: str, system_prompt: str, model: str | None = None) -> str:
-    result = ghostwriter.rewrite.rewrite_document(draft, system_prompt, model)
+def _do_text_rewrite(draft: str, system_prompt: str) -> str:
+    result = ghostwriter.rewrite.rewrite_document(draft, system_prompt)
 
     output_dir = Path("data/rewritten")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -74,14 +74,14 @@ def _do_text_rewrite(draft: str, system_prompt: str, model: str | None = None) -
     return result
 
 
-def _do_file_rewrite(file_bytes: bytes, filename: str, system_prompt: str, model: str | None = None) -> bytes:
+def _do_file_rewrite(file_bytes: bytes, filename: str, system_prompt: str) -> bytes:
     suffix = Path(filename).suffix.lower()
 
     if suffix == ".docx":
-        result_bytes = ghostwriter.rewrite.rewrite_docx(file_bytes, system_prompt, model)
+        result_bytes = ghostwriter.rewrite.rewrite_docx(file_bytes, system_prompt)
     else:
         text = ghostwriter.parse.parse_pdf(file_bytes)
-        result = ghostwriter.rewrite.rewrite_document(text, system_prompt, model)
+        result = ghostwriter.rewrite.rewrite_document(text, system_prompt)
         result_bytes = ghostwriter.parse._make_docx_from_text(result)
 
     output_dir = Path("data/rewritten")
@@ -119,49 +119,34 @@ async def _run_job(job_id: str):
         return
     job["status"] = "running"
 
-    def _run_once(model):
+    def _run_once():
         if job["kind"] == "text":
             return asyncio.to_thread(
-                _do_text_rewrite, job["draft"], job["system_prompt"], model
+                _do_text_rewrite, job["draft"], job["system_prompt"]
             )
         return asyncio.to_thread(
-            _do_file_rewrite, job["file_bytes"], job["filename"], job["system_prompt"], model
+            _do_file_rewrite, job["file_bytes"], job["filename"], job["system_prompt"]
         )
 
     backoffs = [30, 60]
-    last_err = None
-    for model in ghostwriter.llm._available_models():
-        overloaded = False
-        for attempt in range(3):
-            try:
-                job["result"] = await _run_once(model)
-                job["status"] = "done"
+    for attempt in range(3):
+        try:
+            job["result"] = await _run_once()
+            job["status"] = "done"
+            return
+        except Exception as e:
+            if not _is_transient_error(e) or attempt >= len(backoffs):
+                job["status"] = "error"
+                job["error"] = _friendly_error(e)
                 return
-            except Exception as e:
-                last_err = e
-                if ghostwriter.llm._is_overloaded(e):
-                    overloaded = True
-                    break
-                if not _is_transient_error(e) or attempt >= len(backoffs):
-                    job["status"] = "error"
-                    job["error"] = _friendly_error(e)
-                    return
-                time.sleep(backoffs[attempt])
-        if not overloaded:
-            break
+            time.sleep(backoffs[attempt])
 
     job["status"] = "error"
-    if last_err is not None and ghostwriter.llm._is_overloaded(last_err):
-        job["error"] = (
-            "The rewrite could not be completed because every available Gemini "
-            "model is currently experiencing high demand. Please try again later."
-        )
-    else:
-        job["error"] = (
-            "The rewrite could not be completed because Gemini was temporarily "
-            "overloaded or rate-limited after several attempts. Please wait a few "
-            "minutes and try again."
-        )
+    job["error"] = (
+        "The rewrite could not be completed because Gemini was temporarily "
+        "overloaded or rate-limited after several attempts. Please wait a few "
+        "minutes and try again."
+    )
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
