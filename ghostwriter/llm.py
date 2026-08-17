@@ -98,14 +98,14 @@ def _gemini_generate(api_key: str, model: str, prompt: str, system_prompt: str, 
     from google.genai import types
 
     client = _get_gemini_client(api_key)
-    chat = client.chats.create(
+    response = client.models.generate_content(
         model=model,
+        contents=prompt,
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
             temperature=temperature,
         ),
     )
-    response = chat.send_message(prompt)
     return response.text.strip()
 
 
