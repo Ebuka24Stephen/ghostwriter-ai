@@ -31,7 +31,7 @@ def get_client():
 
 def _api_keys():
     keys = []
-    for name in (config.GEMINI_API_SECRET, config.GEMINI_API_KEY, config.GEMINI_API_KEY2):
+    for name in (config.GEMINI_API_KEY, config.GEMINI_API_SECRET, config.GEMINI_API_KEY2):
         value = os.getenv(name, "").strip()
         if value:
             keys.append(value)
