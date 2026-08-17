@@ -109,25 +109,25 @@ def _gemini_generate(api_key: str, model: str, prompt: str, system_prompt: str, 
     return response.text.strip()
 
 
-DEFAULT_GEMINI_MODELS = [
-    "gemini-3.7-flash",
-]
-
-
 def _available_models():
     raw = os.environ.get("GEMINI_MODELS", "")
     if raw:
         return [m.strip() for m in raw.split(",") if m.strip()]
-    return [config.GEMINI_MODEL] + [m for m in DEFAULT_GEMINI_MODELS if m != config.GEMINI_MODEL]
+    models = [config.GEMINI_MODEL, config.GEMINI_FALLBACK_MODEL]
+    seen = []
+    for m in models:
+        if m and m not in seen:
+            seen.append(m)
+    return seen
 
 
-def _ask_gemini(prompt: str, system_prompt: str, temperature: float) -> str:
+def _ask_gemini(prompt: str, system_prompt: str, temperature: float, model: str | None = None) -> str:
     keys = _api_keys()
     if not keys:
         raise RuntimeError("No GEMINI_API_KEY set")
     last_err = None
     deadline = time.monotonic() + 150.0
-    for model in _available_models():
+    for model in [model] if model else _available_models():
         if time.monotonic() >= deadline:
             break
         for api_key in keys:
@@ -239,10 +239,10 @@ def _ask_groq(prompt: str, system_prompt: str, temperature: float) -> str:
     raise last_err
 
 
-def ask(prompt: str, system_prompt: str = None, temperature: float = 0.4) -> str:
+def ask(prompt: str, system_prompt: str = None, temperature: float = 0.4, model: str | None = None) -> str:
     if config.LLM_PROVIDER == "gemini":
         try:
-            return _ask_gemini(prompt, system_prompt, temperature)
+            return _ask_gemini(prompt, system_prompt, temperature, model)
         except Exception as e:
             if not _is_fallback_error(e):
                 raise

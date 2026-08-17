@@ -225,7 +225,7 @@ def strip_added_tail(rewritten, original):
     return candidate
 
 
-def _rewrite_chunk(chunk, system_prompt):
+def _rewrite_chunk(chunk, system_prompt, model=None):
     lines = []
     for n, s, prev_s, next_s in chunk:
         if prev_s and next_s:
@@ -256,7 +256,7 @@ Rules:
 - Use the "(Between: ...)" context only to fit the sentence naturally; never copy words from it into your rewritten sentence
 - Self-check before answering: compare each sentence you wrote against the author's example passages in the system prompt. If it sounds too clean, smooth, modern, or AI-like, rewrite it again internally. Also confirm it is NOT a near-copy of the original sentence
 - Return only the numbered rewritten sentences, nothing else"""
-    result = llm.ask(prompt, system_prompt=system_prompt, temperature=config.REWRITE_TEMPERATURE)
+    result = llm.ask(prompt, system_prompt=system_prompt, temperature=config.REWRITE_TEMPERATURE, model=model)
     return _parse_numbered(result)
 
 
@@ -267,7 +267,7 @@ def _collapse_line_breaks(text):
     return "\n\n".join(paragraphs)
 
 
-def rewrite_document(document, system_prompt):
+def rewrite_document(document, system_prompt, model=None):
     document = _collapse_line_breaks(sanitize_footers(document))
     paras = [p for p in document.split("\n\n") if p.strip()]
     deduped = []
@@ -320,7 +320,7 @@ def rewrite_document(document, system_prompt):
     original_map = {n: s for n, s, _, _ in to_rewrite}
     chunks = [to_rewrite[start:start + CHUNK_SIZE] for start in range(0, len(to_rewrite), CHUNK_SIZE)]
     with ThreadPoolExecutor(max_workers=min(config.REWRITE_MAX_WORKERS, len(chunks)) or 1) as executor:
-        for parsed in executor.map(lambda c: _rewrite_chunk(c, system_prompt), chunks):
+        for parsed in executor.map(lambda c: _rewrite_chunk(c, system_prompt, model), chunks):
             rewrites.update(parsed)
 
     for attempt in range(2):
@@ -343,7 +343,7 @@ Rules:
 - If the original sentence begins with a list marker or label (e.g. "1", "2.", "•", or "Exponential Capacity Growth:"), keep that marker and label exactly at the start of your rewritten sentence
 - Do not add new ideas or append evaluative clauses
 - Return only the numbered rewritten sentences, nothing else"""
-        result = llm.ask(prompt, system_prompt=system_prompt, temperature=config.REWRITE_TEMPERATURE)
+        result = llm.ask(prompt, system_prompt=system_prompt, temperature=config.REWRITE_TEMPERATURE, model=model)
         rewrites.update(_parse_numbered(result))
 
     rebuilt = []
@@ -585,7 +585,7 @@ def close_unclosed_fields(doc) -> None:
         end_para.append(r)
 
 
-def rewrite_docx(file_bytes: bytes, system_prompt: str) -> bytes:
+def rewrite_docx(file_bytes: bytes, system_prompt: str, model: str | None = None) -> bytes:
     doc = Document(io.BytesIO(file_bytes))
     original = list(doc.paragraphs)
 
@@ -641,7 +641,7 @@ def rewrite_docx(file_bytes: bytes, system_prompt: str) -> bytes:
     body_info = {i: f for _, i, f, _ in filtered}
     body_citations = {i: r for _, i, _, r in filtered}
 
-    rewritten_body = rewrite_document("\n\n".join(body_paras), system_prompt)
+    rewritten_body = rewrite_document("\n\n".join(body_paras), system_prompt, model)
     rewritten_paras = [p.strip() for p in rewritten_body.split("\n\n") if p.strip()]
 
     idx = 0

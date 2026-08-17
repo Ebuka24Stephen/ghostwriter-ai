@@ -12,6 +12,7 @@ GEMINI_API_KEY2 = "GEMINI_API_KEY2"
 GEMINI_API_SECRET = "GEMINI_API_SECRET"
 LLM_MODEL = "llama-3.3-70b-versatile"
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.7-flash")
+GEMINI_FALLBACK_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash")
 KEEP_RATIO = float(os.environ.get("GHOSTWRITER_KEEP_RATIO", "0"))
 REWRITE_CHUNK_SIZE = int(os.environ.get("GHOSTWRITER_CHUNK_SIZE", "8"))
 REWRITE_MAX_WORKERS = int(os.environ.get("GHOSTWRITER_MAX_WORKERS", "4"))
